@@ -813,7 +813,7 @@ erDiagram
 
 | Key | Value | TTL | Mục đích |
 |---|---|---|---|
-| `auth:sso:{ssoId}` | `{ userId, createdAt, ip, ua }` | SSO lifetime (vd 7–30 ngày, sliding) | **SSO session trung tâm** (cookie `auth_sso` trỏ tới đây) |
+| `auth:sso:{ssoId}` | `{ userId, createdAt, absoluteExpireAt, ip, ua }` | **Sliding 7 ngày** (reset mỗi lần dùng) + **trần tuyệt đối 30 ngày** | **SSO session trung tâm** (cookie `auth_sso` trỏ tới đây) |
 | `auth:sso:apps:{ssoId}` | Set of `sid` | theo SSO | Các app session dưới 1 lần đăng nhập SSO → phục vụ SLO |
 | `auth:authcode:{code}` | `{ userId, clientId, redirectUri, codeChallenge, roles, ssoId }` | **~60s, one-time** | Authorization code chờ đổi token |
 | `auth:session:{sid}` | JSON session context (gồm `refreshHash`, `ssoId`) | **= refresh token TTL** (vd 7 ngày) | Nguồn sự thật app session |
@@ -825,6 +825,17 @@ erDiagram
 > **Authorization code** phải **one-time + cực ngắn**: đổi token xong là `DEL` ngay; dùng lại code → từ chối (chống replay).
 >
 > **TTL app session** = refresh token TTL (access ngắn hạn kiểm soát qua `exp` JWT). Refresh giữ nguyên `sid`.
+>
+> **SSO session sliding + trần tuyệt đối:**
+> ```
+> Khi tạo: lưu absoluteExpireAt = now + 30 ngày; set TTL key = 7 ngày
+> Mỗi request hợp lệ qua /authorize:
+>   nếu now < absoluteExpireAt:
+>     EXPIRE auth:sso:{ssoId} = min(7 ngày, absoluteExpireAt - now)   // gia hạn (trượt)
+>   else:
+>     hết hạn cứng → buộc đăng nhập lại (dù vẫn đang dùng)
+> ```
+> → Dùng đều thì không phải login lại; nhưng tối đa 30 ngày kể từ login đầu là phải đăng nhập lại.
 
 ### 6.2 Quan hệ SSO session ↔ app session
 
@@ -1034,6 +1045,25 @@ AuthGuard (SDK) → verify JWT + session
 PermissionGuard → map role → permissions nội bộ
 ```
 
+### 8.2b Lưu token phía client (khuyến nghị)
+
+> Đây là quyết định **phía client app**, không ảnh hưởng backend auth. Auth chỉ phát token qua `/token`; cất ở đâu là việc của client.
+
+| Loại client | Cách lưu | Ghi chú |
+|---|---|---|
+| **SPA nhạy cảm** (khuyến nghị) | **BFF** — token ở **Redis của BFF**, browser chỉ giữ cookie `HttpOnly` chứa `sessionId` random | An toàn nhất với XSS; revoke = xoá key Redis |
+| **SPA đơn giản / nội bộ** | `oidc-client-ts`, token in-memory + refresh ngầm | Ít hạ tầng, chấp nhận rủi ro XSS mức trung bình |
+| **Mobile / native** | Secure storage thiết bị (Keychain / Keystore) | Không liên quan Redis |
+
+**BFF pattern:**
+
+```
+Browser ──cookie HttpOnly (sessionId)──► BFF ──tra Redis BFF── lấy access/refresh token
+                                          BFF ──Bearer token──► Resource Server API
+```
+
+> **Lưu ý quan trọng:** Redis của **BFF** (mỗi dự án tự dựng) **khác** Redis của **auth service**. Auth service **không** lưu hộ token cho từng SPA — nó phục vụ nhiều dự án nên không ôm token của mọi app. "Đưa token lên Redis" là việc **BFF của từng dự án** tự làm.
+
 ### 8.3 Đồng bộ user profile
 
 | Cách | Khi nào dùng |
@@ -1173,6 +1203,8 @@ authen-service/
 | 16 | Internal API: Basic `clientId:clientSecret` | Đơn giản; M2M JWT ở Phase 2 |
 | 17 | Verify/reset token lưu Redis | Token ngắn hạn, dùng một lần, không cần collection |
 | 18 | App session TTL = refresh TTL | Refresh luôn validate được, `sid` ổn định |
+| 19 | SSO session sliding 7 ngày + trần tuyệt đối 30 ngày | Tiện (dùng đều không login lại) nhưng không sống vô hạn |
+| 20 | SPA khuyến nghị BFF (token ở Redis của BFF) | Token không xuống browser → an toàn XSS, dễ revoke; Redis BFF tách khỏi Redis auth |
 
 ---
 
@@ -1185,8 +1217,8 @@ authen-service/
 - [x] Redis với prefix `auth:`
 - [x] **SSO thật từ v1**: OAuth2 Authorization Code + PKCE + OIDC
 - [x] Onboard app: tạo `application` (kèm `redirectUris`, `clientType`) + `roles` + gán `membership`
-- [ ] Chốt SSO session cố định hạn hay sliding (gia hạn khi còn hoạt động)
-- [ ] Chốt cơ chế lưu token phía client (SPA: cookie `HttpOnly` qua BFF, hay `oidc-client-ts` in-memory)
+- [x] **SSO session: sliding 7 ngày không hoạt động + trần tuyệt đối 30 ngày**
+- [x] **SPA: khuyến nghị BFF** — token giữ ở Redis của BFF, browser chỉ giữ cookie phiên `HttpOnly` (app đơn giản có thể dùng `oidc-client-ts` in-memory)
 
 ---
 
